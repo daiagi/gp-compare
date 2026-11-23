@@ -20,10 +20,6 @@ ARCHIVE="${GP_WORKSPACE:-$HERE/../workspace}"
 GP="$ARCHIVE/graypaper"
 DIST="$ARCHIVE/dist"
 
-IMAGE=gp-compare-tex
-docker image inspect "$IMAGE" >/dev/null 2>&1 ||
-  docker build -t "$IMAGE" -f "$HERE/build-pdf.Dockerfile" "$HERE"
-
 [ -d "$GP/.git" ] || git clone -q https://github.com/gavofyork/graypaper.git "$GP"
 git -C "$GP" fetch -q origin '+refs/heads/*:refs/remotes/origin/*' --tags
 
@@ -52,6 +48,10 @@ if [ -n "$RESOLVE_ONLY" ]; then
   echo "$SHA $LABEL"
   exit 0
 fi
+
+IMAGE=gp-compare-tex
+docker image inspect "$IMAGE" >/dev/null 2>&1 ||
+  docker build -t "$IMAGE" -f "$HERE/build-pdf.Dockerfile" "$HERE"
 
 mkdir -p "$DIST"
 
