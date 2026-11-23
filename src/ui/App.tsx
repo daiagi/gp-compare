@@ -194,6 +194,14 @@ export function App() {
         <label>
           <input type="checkbox" checked={showSource} onChange={(e) => setShowSource(e.target.checked)} /> Source
         </label>
+        <nav className="links">
+          <a href="https://github.com/daiagi/gp-compare/issues/new" target="_blank" rel="noreferrer">
+            Report an issue
+          </a>
+          <a href="https://github.com/daiagi/gp-compare" target="_blank" rel="noreferrer">
+            GitHub
+          </a>
+        </nav>
         <datalist id="refs">
           {suggestions.map((s) => (
             <option key={s.value} value={s.value}>

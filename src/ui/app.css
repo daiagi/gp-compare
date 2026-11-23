@@ -214,3 +214,19 @@ label {
 .source .add {
   color: var(--add);
 }
+
+.links {
+  display: flex;
+  gap: 14px;
+  margin-left: auto;
+  font-size: 13px;
+}
+
+.links a {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.links a:hover {
+  color: var(--accent);
+}
