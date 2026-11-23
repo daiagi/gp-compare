@@ -8,13 +8,14 @@
 #   gp-build.sh pr/590          the head of a pull request
 #   gp-build.sh pr/590-base     the commit that pull request branched from
 #   gp-build.sh --resolve REF   print "<sha> <label>" without building
+#   gp-build.sh --image         only build the TeX image (setup does this once)
 #
 # Builds run in the TeX image from build-pdf.Dockerfile (built on first use).
 set -euo pipefail
 
 RESOLVE_ONLY=
 if [ "${1:-}" = "--resolve" ]; then RESOLVE_ONLY=1; shift; fi
-REF="${1:?usage: gp-build.sh [--resolve] <tag|sha|branch|pr/N|pr/N-base>}"
+REF="${1:?usage: gp-build.sh [--resolve] <tag|sha|branch|pr/N|pr/N-base> | --image}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ARCHIVE="${GP_WORKSPACE:-$HERE/../workspace}"
 GP="$ARCHIVE/graypaper"
@@ -24,6 +25,9 @@ DIST="$ARCHIVE/dist"
 git -C "$GP" fetch -q origin '+refs/heads/*:refs/remotes/origin/*' --tags
 
 case "$REF" in
+  --image)
+    SHA= LABEL=
+    ;;
   pr/*-base)
     N="${REF#pr/}"; N="${N%-base}"
     git -C "$GP" fetch -q origin "+refs/pull/$N/head:refs/pr/$N"
@@ -50,18 +54,43 @@ if [ -n "$RESOLVE_ONLY" ]; then
 fi
 
 # One build at a time: builds share the TeX image, the graypaper checkout and the intermediate files.
+# Everything that writes to the disk below happens under this lock.
+mkdir -p "$DIST"
 exec 9>"$ARCHIVE/.build.lock"
 flock 9
 
 IMAGE=gp-compare-tex
-docker image inspect "$IMAGE" >/dev/null 2>&1 ||
-  docker build -t "$IMAGE" -f "$HERE/build-pdf.Dockerfile" "$HERE"
+IMAGE_FREE_GB=${IMAGE_FREE_GB:-10}   # the TeX packages take ~5 GB, and ~2 GB more while they unpack
+BUILD_FREE_GB=${BUILD_FREE_GB:-2}    # one build is ~15 MB; keep room for logs and the OS
 
-mkdir -p "$DIST"
+free_gb() { df --output=avail -BG "$DIST" | tail -1 | tr -dc 0-9; }
+
+# Delete the least recently built versions (and cached public files) until enough space is free.
+make_room() {
+  while [ "$(free_gb)" -lt "$1" ]; do
+    oldest="$( (ls -1tr "$DIST"/graypaper-*.pdf "$DIST"/.upstream-cache/graypaper-*.pdf 2>/dev/null || true) | head -1)"
+    [ -n "$oldest" ] || { echo "only $(free_gb) GB free and nothing left to delete" >&2; exit 1; }
+    sha="$(basename "$oldest" .pdf)"; sha="${sha#graypaper-}"
+    dir="$(dirname "$oldest")"
+    echo "low on disk: removing build $sha" >&2
+    rm -rf "$dir/graypaper-$sha".* "$dir/tex-$sha"
+  done
+}
+
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  make_room "$IMAGE_FREE_GB"
+  DOCKER_BUILDKIT=1 timeout 60m docker build -t "$IMAGE" -f "$HERE/build-pdf.Dockerfile" "$HERE" ||
+    { docker builder prune -af >/dev/null 2>&1; exit 1; }
+  docker builder prune -af >/dev/null 2>&1  # the package downloads are not needed after the image exists
+fi
+[ "$REF" = "--image" ] && exit 0
+
 if [ ! -f "$DIST/graypaper-$SHA.pdf" ]; then
+  make_room "$BUILD_FREE_GB"
   git -C "$GP" -c advice.detachedHead=false checkout -q --detach "$SHA"
-  docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e VERSION="$SHA" \
-    -v "$GP:/workspace/graypaper:z" -v "$DIST:/workspace/dist:z" "$IMAGE"
+  timeout 10m docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e VERSION="$SHA" \
+    -v "$GP:/workspace/graypaper:z" -v "$DIST:/workspace/dist:z" "$IMAGE" ||
+    { rm -f "$DIST"/graypaper.* "$DIST/graypaper-$SHA".*; rm -rf "$DIST/tex-$SHA"; exit 1; }
 fi
 
 echo "$SHA $LABEL"
