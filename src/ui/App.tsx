@@ -1,0 +1,355 @@
+import type { PDFDocumentProxy } from "pdfjs-dist";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { archiveUrls } from "../core/archive";
+import { type Comparison, compareDocs, loadDoc, type Position, type Side } from "../core/compare";
+import { type Change, findChanges, type Mark } from "../core/words";
+import { PdfPane, type PdfPaneHandle } from "./PdfPane";
+import { extractRuns } from "./pdfText";
+import { type BuildStatus, useBuild } from "./useBuild";
+
+const ARCHIVE = "/archive";
+const COLORS: Record<Side, string> = { left: "#ff5c5c", right: "#3ddc84" };
+const JUMP_MARGIN_PX = 80;
+
+interface Refs {
+  left: string;
+  right: string;
+}
+
+/** `?left=<ref>&right=<ref>`, or `?pr=<n>` for a pull request against the commit it branched from. */
+function readRefs(): Refs {
+  const params = new URLSearchParams(window.location.search);
+  const pr = params.get("pr");
+  if (pr) return { left: `pr/${pr}-base`, right: `pr/${pr}` };
+  return { left: params.get("left") ?? "", right: params.get("right") ?? "" };
+}
+
+function writeRefs(refs: Refs) {
+  const params = new URLSearchParams();
+  if (refs.left) params.set("left", refs.left);
+  if (refs.right) params.set("right", refs.right);
+  window.history.pushState(null, "", `?${params}`);
+}
+
+export function App() {
+  const [refs, setRefs] = useState<Refs>(readRefs);
+  const [draft, setDraft] = useState<Refs>(refs);
+  const [linked, setLinked] = useState(true);
+  const [showHighlights, setShowHighlights] = useState(true);
+  const [showSource, setShowSource] = useState(true);
+  const [current, setCurrent] = useState(-1);
+
+  useEffect(() => {
+    const onPop = () => {
+      const next = readRefs();
+      setPdfs({});
+      setRefs(next);
+      setDraft(next);
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  const left = useBuild(refs.left);
+  const right = useBuild(refs.right);
+  const comparison = useComparison(left, right);
+  const [pdfs, setPdfs] = useState<Partial<Record<Side, PDFDocumentProxy>>>({});
+  const found = useChanges(comparison, pdfs);
+  const changes = useMemo(() => found ?? [], [found]);
+  const marks = useMemo(() => marksByPage(changes), [changes]);
+
+  const panes = { left: useRef<PdfPaneHandle>(null), right: useRef<PdfPaneHandle>(null) };
+
+  const compare = (next: Refs) => {
+    writeRefs(next);
+    setPdfs({});
+    setRefs(next);
+    setCurrent(-1);
+  };
+
+  const follow = useCallback(
+    (from: Side, position: Position) => {
+      setCurrent(currentChange(changes, from, position));
+      if (!linked || !comparison) return;
+      const to: Side = from === "left" ? "right" : "left";
+      const target = comparison.mapPosition(from, position);
+      if (target) panes[to].current?.scrollToPosition(target);
+    },
+    // biome-ignore lint/correctness/useExhaustiveDependencies: pane refs are stable
+    [linked, comparison, changes],
+  );
+
+  const jump = useCallback(
+    (direction: 1 | -1) => {
+      if (!changes.length) return;
+      const index = Math.min(Math.max(current + direction, 0), changes.length - 1);
+      setCurrent(index);
+      const change = changes[index];
+      for (const side of ["left", "right"] as const) panes[side].current?.scrollToPosition(change[side], JUMP_MARGIN_PX);
+    },
+    // biome-ignore lint/correctness/useExhaustiveDependencies: pane refs are stable
+    [changes, current],
+  );
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.key === "]" || e.key === "n") jump(1);
+      if (e.key === "[" || e.key === "p") jump(-1);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [jump]);
+
+  const suggestions = useRefSuggestions();
+
+  return (
+    <div className="app">
+      <header className="toolbar">
+        <strong className="title">GP compare</strong>
+        <form
+          className="refs"
+          onSubmit={(e) => {
+            e.preventDefault();
+            compare(draft);
+          }}
+        >
+          <RefInput label="Left" value={draft.left} onChange={(left) => setDraft({ ...draft, left })} />
+          <button
+            type="button"
+            title="Swap sides"
+            onClick={() => {
+              const swapped = { left: draft.right, right: draft.left };
+              setDraft(swapped);
+              compare(swapped);
+            }}
+          >
+            ⇄
+          </button>
+          <RefInput label="Right" value={draft.right} onChange={(right) => setDraft({ ...draft, right })} />
+          <button type="submit" className="primary">
+            Compare
+          </button>
+        </form>
+        <div className="nav">
+          <button type="button" onClick={() => jump(-1)} disabled={!changes.length} title="Previous change ( [ or p )">
+            ◀
+          </button>
+          <span className="counter">
+            {found ? `${current >= 0 ? current + 1 : "–"} / ${changes.length} changes` : ""}
+          </span>
+          <button type="button" onClick={() => jump(1)} disabled={!changes.length} title="Next change ( ] or n )">
+            ▶
+          </button>
+        </div>
+        <label title="Scroll both sides together. Hold Shift while scrolling to move one side alone.">
+          <input type="checkbox" checked={linked} onChange={(e) => setLinked(e.target.checked)} /> Link scrolling
+        </label>
+        <label>
+          <input type="checkbox" checked={showHighlights} onChange={(e) => setShowHighlights(e.target.checked)} />{" "}
+          Highlights
+        </label>
+        <label>
+          <input type="checkbox" checked={showSource} onChange={(e) => setShowSource(e.target.checked)} /> Source
+        </label>
+        <datalist id="refs">
+          {suggestions.map((s) => (
+            <option key={s.value} value={s.value}>
+              {s.label}
+            </option>
+          ))}
+        </datalist>
+      </header>
+
+      <main className="panes">
+        {(["left", "right"] as const).map((side) => {
+          const status = side === "left" ? left : right;
+          return (
+            <section key={side} className={`pane pane-${side}`}>
+              <PaneHeader status={status} side={side} />
+              {status?.state === "ready" && status.sha ? (
+                <PdfPane
+                  ref={panes[side]}
+                  url={archiveUrls(ARCHIVE, status.sha).pdf}
+                  marks={showHighlights ? marks[side] : null}
+                  onDocument={(doc) => setPdfs((prev) => ({ ...prev, [side]: doc }))}
+                  color={COLORS[side]}
+                  onUserScroll={(position) => follow(side, position)}
+                />
+              ) : (
+                <PaneMessage status={status} />
+              )}
+            </section>
+          );
+        })}
+      </main>
+
+      {showSource && changes[current] && <SourcePanel change={changes[current]} comparison={comparison} />}
+    </div>
+  );
+}
+
+function RefInput({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+  return (
+    <label className="ref">
+      {label}
+      <input
+        list="refs"
+        value={value}
+        placeholder="v0.8.0, main, sha, pr/590, pr/590-base"
+        onChange={(e) => onChange(e.target.value.trim())}
+        spellCheck={false}
+      />
+    </label>
+  );
+}
+
+function PaneHeader({ status, side }: { status: BuildStatus | null; side: Side }) {
+  if (!status?.sha) return <div className={`pane-header pane-header-${side}`}>{status?.ref || "no version"}</div>;
+  const pr = status.ref.match(/^pr\/(\d+)/)?.[1];
+  return (
+    <div className={`pane-header pane-header-${side}`}>
+      <span>{status.label}</span>
+      <a href={`https://github.com/gavofyork/graypaper/commit/${status.sha}`} target="_blank" rel="noreferrer">
+        {status.sha.slice(0, 7)}
+      </a>
+      {pr && (
+        <a href={`https://github.com/gavofyork/graypaper/pull/${pr}`} target="_blank" rel="noreferrer">
+          PR #{pr}
+        </a>
+      )}
+    </div>
+  );
+}
+
+function PaneMessage({ status }: { status: BuildStatus | null }) {
+  if (!status) return <div className="pane-message">Pick a version above.</div>;
+  if (status.state === "resolving") return <div className="pane-message">Looking up {status.ref}…</div>;
+  if (status.state === "building")
+    return <div className="pane-message">Building {status.label ?? status.ref}. This takes about 20 seconds.</div>;
+  return (
+    <div className="pane-message error">
+      Could not load {status.ref}.<pre>{status.log}</pre>
+    </div>
+  );
+}
+
+function SourcePanel({ change, comparison }: { change: Change; comparison: Comparison | null }) {
+  const lines = (side: Side, path: string, start: number, end: number) =>
+    comparison?.docs[side].lines.get(path)?.slice(start - 1, end - 1) ?? [];
+  return (
+    <footer className="source">
+      {change.source.map(({ path, hunk }) => (
+        <div key={`${path}:${hunk.rightStart}`}>
+          <div className="source-path">
+            {path}:{hunk.rightStart}
+          </div>
+          <pre>
+            {lines("left", path, hunk.leftStart, hunk.leftEnd).map((line, i) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: lines are static
+              <div key={`-${i}`} className="del">
+                - {line}
+              </div>
+            ))}
+            {lines("right", path, hunk.rightStart, hunk.rightEnd).map((line, i) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: lines are static
+              <div key={`+${i}`} className="add">
+                + {line}
+              </div>
+            ))}
+          </pre>
+        </div>
+      ))}
+    </footer>
+  );
+}
+
+/** The changes, once the text of both PDFs has been read. */
+function useChanges(comparison: Comparison | null, pdfs: Partial<Record<Side, PDFDocumentProxy>>): Change[] | null {
+  const [changes, setChanges] = useState<Change[] | null>(null);
+  const { left, right } = pdfs;
+
+  useEffect(() => {
+    setChanges(null);
+    if (!comparison || !left || !right) return;
+    let cancelled = false;
+    const text = (pdf: PDFDocumentProxy) => Promise.all(Array.from({ length: pdf.numPages }, (_, i) => extractRuns(pdf, i + 1)));
+    Promise.all([text(left), text(right)]).then(([l, r]) => {
+      if (!cancelled) setChanges(findChanges(comparison, { left: l, right: r }));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [comparison, left, right]);
+
+  return changes;
+}
+
+function marksByPage(changes: Change[]): Record<Side, Map<number, Mark[]>> {
+  const forSide = (side: Side) => {
+    const pages = new Map<number, Mark[]>();
+    for (const mark of changes.flatMap((c) => c.marks[side])) {
+      const marks = pages.get(mark.page) ?? [];
+      if (!marks.length) pages.set(mark.page, marks);
+      marks.push(mark);
+    }
+    return pages;
+  };
+  return { left: forSide("left"), right: forSide("right") };
+}
+
+function useComparison(left: BuildStatus | null, right: BuildStatus | null): Comparison | null {
+  const [comparison, setComparison] = useState<Comparison | null>(null);
+  const leftSha = left?.state === "ready" ? left.sha : undefined;
+  const rightSha = right?.state === "ready" ? right.sha : undefined;
+
+  useEffect(() => {
+    setComparison(null);
+    if (!leftSha || !rightSha) return;
+    let cancelled = false;
+    const load = (sha: string) => {
+      const urls = archiveUrls(ARCHIVE, sha);
+      return loadDoc(urls.synctex, urls.tex);
+    };
+    Promise.all([load(leftSha), load(rightSha)]).then(([l, r]) => {
+      if (cancelled) return;
+      setComparison(compareDocs(l, r));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [leftSha, rightSha]);
+
+  return comparison;
+}
+
+/** The last change at or above the given place. */
+function currentChange(changes: Change[], side: Side, position: Position) {
+  let index = -1;
+  changes.forEach((change, i) => {
+    const p = change[side];
+    if (p.page < position.page || (p.page === position.page && p.y <= position.y + 0.02)) index = i;
+  });
+  return index;
+}
+
+function useRefSuggestions() {
+  const [refs, setRefs] = useState<{ tags: string[]; branches: string[]; pulls: { number: number; title: string }[] }>();
+  useEffect(() => {
+    fetch("/api/refs")
+      .then((r) => r.json())
+      .then(setRefs)
+      .catch(() => {});
+  }, []);
+  return useMemo(() => {
+    if (!refs) return [];
+    return [
+      ...refs.branches.map((b) => ({ value: b, label: "branch" })),
+      ...refs.tags.map((t) => ({ value: t, label: "release" })),
+      ...refs.pulls.flatMap((p) => [
+        { value: `pr/${p.number}`, label: `#${p.number} ${p.title}` },
+        { value: `pr/${p.number}-base`, label: `base of #${p.number}` },
+      ]),
+    ];
+  }, [refs]);
+}
