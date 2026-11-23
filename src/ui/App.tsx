@@ -275,11 +275,39 @@ function PaneHeader({ status, side }: { status: BuildStatus | null; side: Side }
 function PaneMessage({ status }: { status: BuildStatus | null }) {
   if (!status) return <div className="pane-message">Pick a version above.</div>;
   if (status.state === "resolving") return <div className="pane-message">Looking up {status.ref}…</div>;
-  if (status.state === "building")
-    return <div className="pane-message">Building {status.label ?? status.ref}. This takes about 20 seconds.</div>;
+  if (status.state === "building") return <BuildProgress status={status} />;
   return (
     <div className="pane-message error">
       Could not load {status.ref}.<pre>{status.log}</pre>
+    </div>
+  );
+}
+
+/** "Building PR #590 · 1:12 · step 3/5 typesetting again (references)", updated every second. */
+function BuildProgress({ status }: { status: BuildStatus }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const seconds = Math.max(0, Math.round((now - (status.since ?? now)) / 1000));
+  const step = status.progress?.match(/^(\d+)\/(\d+) (.*)$/);
+  return (
+    <div className="pane-message">
+      <div>
+        Building {status.label ?? status.ref} · {Math.floor(seconds / 60)}:{String(seconds % 60).padStart(2, "0")}
+      </div>
+      {step ? (
+        <>
+          <progress max={Number(step[2])} value={Number(step[1]) - 0.5} />
+          <div className="muted">
+            step {step[1]} of {step[2]}: {step[3]}
+          </div>
+        </>
+      ) : (
+        <div className="muted">{status.progress || "starting"}</div>
+      )}
+      <div className="muted">A new version takes about a minute; after that it opens at once.</div>
     </div>
   );
 }

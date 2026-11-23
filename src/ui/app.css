@@ -230,3 +230,15 @@ label {
 .links a:hover {
   color: var(--accent);
 }
+
+.pane-message progress {
+  display: block;
+  width: 260px;
+  margin: 10px 0 4px;
+  accent-color: var(--accent);
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 13px;
+}

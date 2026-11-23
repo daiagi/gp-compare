@@ -63,6 +63,8 @@ fi
 # One build at a time: builds share the TeX image, the graypaper checkout and the intermediate files.
 # Everything that writes to the disk below happens under this lock.
 mkdir -p "$DIST"
+progress() { [ -n "${SHA:-}" ] && echo "$1" > "$DIST/.progress-$SHA" || true; }
+progress "waiting for another build to finish"
 exec 9>"$ARCHIVE/.build.lock"
 flock 9
 
@@ -87,13 +89,16 @@ make_room() {
 
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
   # Rebuilding on top of an existing image reuses its TeX layers and needs little space.
+  progress "installing TeX (one time, about 15 minutes)"
   if docker images -q gp-compare-tex | grep -q .; then make_room "$BUILD_FREE_GB"; else make_room "$IMAGE_FREE_GB"; fi
   DOCKER_BUILDKIT=1 timeout 60m docker build -t "$IMAGE" -f "$HERE/build-pdf.Dockerfile" "$HERE" ||
     { docker builder prune -af >/dev/null 2>&1; exit 1; }
   docker images gp-compare-tex --format '{{.Repository}}:{{.Tag}}' | grep -vx "$IMAGE" | xargs -r docker rmi >/dev/null 2>&1 || true
   docker builder prune -af >/dev/null 2>&1  # the package downloads are not needed after the image exists
 fi
-RUN=(docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$HERE:/app/server:ro,z" -v "$HERE/../src:/app/src:ro,z" -v "$HERE/../package.json:/app/package.json:ro,z"
+# HOME persists between builds so TeX's font caches are built once, not on every build.
+mkdir -p "$ARCHIVE/.home"
+RUN=(docker run --rm --user "$(id -u):$(id -g)" -e HOME=/home/builder -v "$ARCHIVE/.home:/home/builder:z" -v "$HERE:/app/server:ro,z" -v "$HERE/../src:/app/src:ro,z" -v "$HERE/../package.json:/app/package.json:ro,z"
   -v "$GP:/workspace/graypaper:z" -v "$DIST:/workspace/dist:z")
 
 if [ -n "$TEXT_ONLY" ]; then
@@ -109,7 +114,7 @@ if [ ! -f "$DIST/graypaper-$SHA.pdf" ]; then
   make_room "$BUILD_FREE_GB"
   git -C "$GP" -c advice.detachedHead=false checkout -q --detach "$SHA"
   timeout 10m "${RUN[@]}" -e VERSION="$SHA" "$IMAGE" ||
-    { rm -f "$DIST"/graypaper.* "$DIST/graypaper-$SHA".*; rm -rf "$DIST/tex-$SHA"; exit 1; }
+    { rm -f "$DIST"/graypaper.* "$DIST/graypaper-$SHA".* "$DIST/.progress-$SHA"; rm -rf "$DIST/tex-$SHA"; exit 1; }
 fi
 
 echo "$SHA $LABEL"

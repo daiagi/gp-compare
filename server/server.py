@@ -114,7 +114,8 @@ def version_status(ref):
         build = builds[sha]
     elif build["state"] == "error":
         builds.pop(sha)  # report the failure once; asking again retries the build
-    return {**status, **build}
+    progress = DIST / f".progress-{sha}"
+    return {**status, **build, "progress": progress.read_text().strip() if progress.is_file() else ""}
 
 
 def github(path):

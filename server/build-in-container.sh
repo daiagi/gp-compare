@@ -5,6 +5,8 @@
 # With TEXT_FROM=<pdf> it only extracts that PDF's text (for versions built elsewhere).
 set -euo pipefail
 : "${VERSION:?}"
+# Each step writes its name to dist/.progress-$VERSION, which the server reports while building.
+step() { echo "$1" > "/workspace/dist/.progress-$VERSION"; }
 text() { /workspace/node_modules/.bin/tsx /app/server/extract-text.mts "$1" "/workspace/dist/graypaper-$VERSION.text.json"; }
 if [ -n "${TEXT_FROM:-}" ]; then text "$TEXT_FROM"; exit; fi
 cd /workspace/graypaper
@@ -13,16 +15,21 @@ latex() {
   xelatex -halt-on-error -interaction=nonstopmode -synctex=1 -output-directory ../dist graypaper.tex >/dev/null ||
     { tail -40 ../dist/graypaper.log; exit 1; }
 }
+step "1/5 typesetting"
 latex
+step "2/5 bibliography"
 biber --output-directory ../dist graypaper >/dev/null
+step "3/5 typesetting again (references)"
 latex
 latex
 
 cd /workspace
+step "4/5 page map"
 gzip -df dist/graypaper.synctex.gz
 npx tsx scripts/synctex-to-json.ts dist/graypaper.synctex "dist/graypaper-$VERSION.synctex.json"
 mv dist/graypaper.pdf "dist/graypaper-$VERSION.pdf"
+step "5/5 text"
 text "dist/graypaper-$VERSION.pdf"
 rm -rf "dist/tex-$VERSION" && mkdir "dist/tex-$VERSION"
 (cd graypaper && find . -name '*.tex' -exec cp --parents {} "../dist/tex-$VERSION/" \;)
-rm -f dist/graypaper.*
+rm -f dist/graypaper.* "dist/.progress-$VERSION"

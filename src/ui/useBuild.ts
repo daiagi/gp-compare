@@ -6,6 +6,10 @@ export interface BuildStatus {
   sha?: string;
   label?: string;
   log?: string;
+  /** While building: the current step, e.g. "3/5 typesetting again (references)". */
+  progress?: string;
+  /** While building: when this page first saw it building (ms since epoch). */
+  since?: number;
 }
 
 const POLL_MS = 2000;
@@ -30,7 +34,12 @@ export function useBuild(ref: string): BuildStatus | null {
         const response = await fetch(`/api/version?ref=${encodeURIComponent(ref)}`);
         const body = (await response.json()) as BuildStatus;
         if (cancelled) return;
-        setStatus({ ...body, ref, state: body.state ?? "error" });
+        setStatus((prev) => ({
+          ...body,
+          ref,
+          state: body.state ?? "error",
+          since: body.state === "building" ? (prev?.since ?? Date.now()) : undefined,
+        }));
         if (body.state === "building") timer = window.setTimeout(poll, POLL_MS);
       } catch (e) {
         // The server restarting or busy (an empty 502 from the proxy) is not a failed build: keep trying.
