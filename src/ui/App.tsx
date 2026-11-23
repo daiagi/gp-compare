@@ -336,9 +336,10 @@ function currentChange(changes: Change[], side: Side, position: Position) {
 function useRefSuggestions() {
   const [refs, setRefs] = useState<{ tags: string[]; branches: string[]; pulls: { number: number; title: string }[] }>();
   useEffect(() => {
+    // Suggestions are optional: if the list can't be loaded (e.g. GitHub rate limit), just show none.
     fetch("/api/refs")
-      .then((r) => r.json())
-      .then(setRefs)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((body) => body?.tags && body?.pulls && setRefs(body))
       .catch(() => {});
   }, []);
   return useMemo(() => {
