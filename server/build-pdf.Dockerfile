@@ -15,6 +15,10 @@ RUN git clone -q https://github.com/FluffyLabs/graypaper-archive.git /workspace 
     git -C /workspace checkout -q "$ARCHIVE_REF" && \
     cd /workspace && npm ci --no-audit --no-fund
 
+# ImageMagick shrinks the page background before each build (see build-in-container.sh).
+RUN apt-get update && apt-get install -y --no-install-recommends imagemagick && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
 # pdf.js for extracting each build's text on the server (server/extract-text.ts, mounted at /app).
 RUN npm install --prefix /opt/pdfjs --no-audit --no-fund pdfjs-dist@6.0.227
 ENV PDFJS_MODULE=/opt/pdfjs/node_modules/pdfjs-dist/legacy/build/pdf.mjs
