@@ -30,19 +30,25 @@ case "$REF" in
   --image)
     SHA= LABEL=
     ;;
-  pr/*-base)
-    N="${REF#pr/}"; N="${N%-base}"
-    git -C "$GP" fetch -q origin "+refs/pull/$N/head:refs/pr/$N"
-    BASE_BRANCH="$(curl -fsS ${GITHUB_TOKEN:+-H "Authorization: Bearer $GITHUB_TOKEN"} \
-      "https://api.github.com/repos/gavofyork/graypaper/pulls/$N" | jq -r .base.ref)"
-    SHA="$(git -C "$GP" merge-base "refs/pr/$N" "origin/$BASE_BRANCH")"
-    LABEL="PR #$N base"
-    ;;
   pr/*)
-    N="${REF#pr/}"
-    git -C "$GP" fetch -q origin "+refs/pull/$N/head:refs/pr/$N"
-    SHA="$(git -C "$GP" rev-parse "refs/pr/$N")"
-    LABEL="PR #$N"
+    # GitHub's refs/pull/N/head can lag behind the PR, so take the head commit from the API and
+    # fetch it from the branch it lives on (often a fork).
+    N="${REF#pr/}"; N="${N%-base}"
+    PR="$(curl -fsS ${GITHUB_TOKEN:+-H "Authorization: Bearer $GITHUB_TOKEN"} \
+      "https://api.github.com/repos/gavofyork/graypaper/pulls/$N")" || { echo "no such pull request: #$N" >&2; exit 1; }
+    HEAD="$(jq -r .head.sha <<<"$PR")"
+    if ! git -C "$GP" cat-file -e "$HEAD^{commit}" 2>/dev/null; then
+      git -C "$GP" fetch -q "$(jq -r '.head.repo.clone_url // empty' <<<"$PR")" "+refs/heads/$(jq -r .head.ref <<<"$PR"):refs/pr/$N" 2>/dev/null ||
+        git -C "$GP" fetch -q origin "+refs/pull/$N/head:refs/pr/$N"
+    fi
+    git -C "$GP" cat-file -e "$HEAD^{commit}" 2>/dev/null || { echo "could not fetch the head of #$N ($HEAD)" >&2; exit 1; }
+    if [ "${REF%-base}" != "$REF" ]; then
+      SHA="$(git -C "$GP" merge-base "$HEAD" "origin/$(jq -r .base.ref <<<"$PR")")"
+      LABEL="PR #$N base"
+    else
+      SHA="$HEAD"
+      LABEL="PR #$N"
+    fi
     ;;
   *)
     # A branch, a tag or commit, or a version without its "v" (0.8.1 for v0.8.1).
