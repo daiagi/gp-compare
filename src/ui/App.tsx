@@ -61,7 +61,7 @@ export function App() {
   const right = useBuild(refs.right);
   const comparison = useComparison(left, right);
   const [pdfs, setPdfs] = useState<Partial<Record<Side, PDFDocumentProxy>>>({});
-  const found = useChanges(comparison, pdfs);
+  const { changes: found, pagesRead, pageCount } = useChanges(comparison, pdfs);
   const changes = useMemo(() => found ?? [], [found]);
   const marks = useMemo(() => marksByPage(changes), [changes]);
 
@@ -150,7 +150,13 @@ export function App() {
             ◀
           </button>
           <span className="counter">
-            {found ? `${current >= 0 ? current + 1 : "–"} / ${changes.length} changes` : ""}
+            {found
+              ? `${current >= 0 ? current + 1 : "–"} / ${changes.length} changes`
+              : left?.state === "ready" && right?.state === "ready"
+                ? pageCount
+                  ? `Comparing… ${Math.round((100 * pagesRead) / pageCount)}%`
+                  : "Loading PDFs…"
+                : ""}
           </span>
           <button type="button" onClick={() => jump(1)} disabled={!changes.length} title="Next change ( ] or n )">
             ▶
@@ -279,15 +285,26 @@ function SourcePanel({ change, comparison }: { change: Change; comparison: Compa
 }
 
 /** The changes, once the text of both PDFs has been read. */
-function useChanges(comparison: Comparison | null, pdfs: Partial<Record<Side, PDFDocumentProxy>>): Change[] | null {
+/** The changes, once both PDFs' text has been read; meanwhile how many pages have been read. */
+function useChanges(comparison: Comparison | null, pdfs: Partial<Record<Side, PDFDocumentProxy>>) {
   const [changes, setChanges] = useState<Change[] | null>(null);
+  const [pagesRead, setPagesRead] = useState(0);
   const { left, right } = pdfs;
 
   useEffect(() => {
     setChanges(null);
+    setPagesRead(0);
     if (!comparison || !left || !right) return;
     let cancelled = false;
-    const text = (pdf: PDFDocumentProxy) => Promise.all(Array.from({ length: pdf.numPages }, (_, i) => extractRuns(pdf, i + 1)));
+    const text = (pdf: PDFDocumentProxy) =>
+      Promise.all(
+        Array.from({ length: pdf.numPages }, (_, i) =>
+          extractRuns(pdf, i + 1).then((runs) => {
+            if (!cancelled) setPagesRead((n) => n + 1);
+            return runs;
+          }),
+        ),
+      );
     Promise.all([text(left), text(right)]).then(([l, r]) => {
       if (!cancelled) setChanges(findChanges(comparison, { left: l, right: r }));
     });
@@ -296,7 +313,8 @@ function useChanges(comparison: Comparison | null, pdfs: Partial<Record<Side, PD
     };
   }, [comparison, left, right]);
 
-  return changes;
+  const pageCount = left && right ? left.numPages + right.numPages : 0;
+  return { changes, pagesRead, pageCount };
 }
 
 function marksByPage(changes: Change[]): Record<Side, Map<number, Mark[]>> {
