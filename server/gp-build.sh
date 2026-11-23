@@ -49,15 +49,15 @@ if [ -n "$RESOLVE_ONLY" ]; then
   exit 0
 fi
 
+# One build at a time: builds share the TeX image, the graypaper checkout and the intermediate files.
+exec 9>"$ARCHIVE/.build.lock"
+flock 9
+
 IMAGE=gp-compare-tex
 docker image inspect "$IMAGE" >/dev/null 2>&1 ||
   docker build -t "$IMAGE" -f "$HERE/build-pdf.Dockerfile" "$HERE"
 
 mkdir -p "$DIST"
-
-# One build at a time: builds share the graypaper checkout and the intermediate files.
-exec 9>"$ARCHIVE/.build.lock"
-flock 9
 if [ ! -f "$DIST/graypaper-$SHA.pdf" ]; then
   git -C "$GP" -c advice.detachedHead=false checkout -q --detach "$SHA"
   docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e VERSION="$SHA" \
