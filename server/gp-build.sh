@@ -45,7 +45,12 @@ case "$REF" in
     LABEL="PR #$N"
     ;;
   *)
-    SHA="$(git -C "$GP" rev-parse --verify -q "origin/$REF^{commit}" || git -C "$GP" rev-parse --verify "$REF^{commit}")"
+    # A branch, a tag or commit, or a version without its "v" (0.8.1 for v0.8.1).
+    SHA=
+    for candidate in "origin/$REF" "$REF" "v$REF"; do
+      SHA="$(git -C "$GP" rev-parse --verify -q "$candidate^{commit}")" && break
+    done
+    [ -n "$SHA" ] || { echo "unknown version: $REF (expected a tag like v0.8.1, a branch, a commit, pr/N or pr/N-base)" >&2; exit 1; }
     LABEL="$REF"
     ;;
 esac
