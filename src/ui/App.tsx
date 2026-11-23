@@ -24,6 +24,13 @@ function readRefs(): Refs {
   return { left: params.get("left") ?? "", right: params.get("right") ?? "" };
 }
 
+/** "PR #590 · GP compare", "v0.7.2 → v0.8.0 · GP compare", or just the name. */
+function pageTitle({ left, right }: Refs) {
+  const pr = right.match(/^pr\/(\d+)$/)?.[1];
+  const what = pr && left === `pr/${pr}-base` ? `PR #${pr}` : left && right ? `${left} → ${right}` : "";
+  return what ? `${what} · GP compare` : "GP compare";
+}
+
 function writeRefs(refs: Refs) {
   const params = new URLSearchParams();
   if (refs.left) params.set("left", refs.left);
@@ -101,12 +108,19 @@ export function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [jump]);
 
+  useEffect(() => {
+    document.title = pageTitle(refs);
+  }, [refs]);
+
   const suggestions = useRefSuggestions();
 
   return (
     <div className="app">
       <header className="toolbar">
-        <strong className="title">GP compare</strong>
+        <strong className="title">
+          <img src="/favicon.svg" alt="" width="20" height="20" />
+          GP compare
+        </strong>
         <form
           className="refs"
           onSubmit={(e) => {
