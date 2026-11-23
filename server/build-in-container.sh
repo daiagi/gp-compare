@@ -11,8 +11,11 @@ text() { /workspace/node_modules/.bin/tsx /app/server/extract-text.mts "$1" "/wo
 if [ -n "${TEXT_FROM:-}" ]; then text "$TEXT_FROM"; exit; fi
 cd /workspace/graypaper
 
+# Without the page background: release commits enable it, and writing it into every page makes
+# the PDF step take minutes instead of seconds. Text and layout are unchanged.
 latex() {
-  xelatex -halt-on-error -interaction=nonstopmode -synctex=1 -output-directory ../dist graypaper.tex >/dev/null ||
+  xelatex -halt-on-error -interaction=nonstopmode -synctex=1 -output-directory ../dist -jobname=graypaper \
+    '\AtBeginDocument{\ClearShipoutPicture}\input{graypaper.tex}' >/dev/null ||
     { tail -40 ../dist/graypaper.log; exit 1; }
 }
 step "1/5 typesetting"
