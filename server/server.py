@@ -85,10 +85,28 @@ def start_build(ref, sha):
     threading.Thread(target=run, daemon=True).start()
 
 
+extracting = set()  # shas whose text is being extracted
+
+
+def extract_text(sha):
+    """Released versions come without our text file; make it once, in the background.
+    Until it exists the app reads the text from the PDF itself."""
+    if (DIST / f"graypaper-{sha}.text.json").is_file() or sha in extracting:
+        return
+    extracting.add(sha)
+
+    def run():
+        subprocess.run([BUILD, "--text", sha], capture_output=True)
+        extracting.discard(sha)
+
+    threading.Thread(target=run, daemon=True).start()
+
+
 def version_status(ref):
     sha, label = resolve(ref)
     status = {"ref": ref, "sha": sha, "label": label}
     if has_local(sha) or sha in upstream_versions():
+        extract_text(sha)
         return {**status, "state": "ready"}
     build = builds.get(sha)
     if build is None:
@@ -167,6 +185,8 @@ class Handler(SimpleHTTPRequestHandler):
 
     def send_archive_file(self, name):
         path = DIST / name
+        if not path.is_file() and name.endswith(".text.json"):
+            return self.send_error(404)  # ours only; not extracted yet
         if not path.is_file():
             path = CACHE / name
             if not path.is_file():

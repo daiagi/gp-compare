@@ -1,6 +1,6 @@
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import type { TextItem } from "pdfjs-dist/types/src/display/api";
-import type { TextRun } from "../core/words";
+import type { TextRun } from "./words";
 
 /** Share of the font size below the baseline, for descenders. */
 const DESCENT = 0.25;

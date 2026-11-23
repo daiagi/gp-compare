@@ -15,6 +15,11 @@ RUN git clone -q https://github.com/FluffyLabs/graypaper-archive.git /workspace 
     git -C /workspace checkout -q "$ARCHIVE_REF" && \
     cd /workspace && npm ci --no-audit --no-fund
 
-COPY build-in-container.sh /usr/local/bin/build-in-container.sh
+# pdf.js for extracting each build's text on the server (server/extract-text.ts, mounted at /app).
+RUN npm install --prefix /opt/pdfjs --no-audit --no-fund pdfjs-dist@6.0.227
+ENV PDFJS_MODULE=/opt/pdfjs/node_modules/pdfjs-dist/legacy/build/pdf.mjs
+
+# The build steps (server/build-in-container.sh) are mounted at /app at run time, not copied in,
+# so changing them does not rebuild this image.
 WORKDIR /workspace
-CMD ["build-in-container.sh"]
+CMD ["/app/server/build-in-container.sh"]

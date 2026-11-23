@@ -4,7 +4,8 @@ import { archiveUrls } from "../core/archive";
 import { type Comparison, compareDocs, loadDoc, type Position, type Side } from "../core/compare";
 import { type Change, findChanges, type Mark } from "../core/words";
 import { PdfPane, type PdfPaneHandle } from "./PdfPane";
-import { extractRuns } from "./pdfText";
+import { extractRuns } from "../core/pdfText";
+import type { TextRun } from "../core/words";
 import { type BuildStatus, useBuild } from "./useBuild";
 
 const ARCHIVE = "/archive";
@@ -61,7 +62,11 @@ export function App() {
   const right = useBuild(refs.right);
   const comparison = useComparison(left, right);
   const [pdfs, setPdfs] = useState<Partial<Record<Side, PDFDocumentProxy>>>({});
-  const { changes: found, pagesRead, pageCount } = useChanges(comparison, pdfs);
+  const shas = useMemo(
+    () => ({ left: left?.state === "ready" ? left.sha : undefined, right: right?.state === "ready" ? right.sha : undefined }),
+    [left, right],
+  );
+  const { changes: found, progress } = useChanges(comparison, shas, pdfs);
   const changes = useMemo(() => found ?? [], [found]);
   const marks = useMemo(() => marksByPage(changes), [changes]);
 
@@ -86,17 +91,34 @@ export function App() {
     [linked, comparison, changes],
   );
 
-  const jump = useCallback(
-    (direction: 1 | -1) => {
-      if (!changes.length) return;
-      const index = Math.min(Math.max(current + direction, 0), changes.length - 1);
-      setCurrent(index);
+  const goTo = useCallback(
+    (index: number) => {
       const change = changes[index];
+      if (!change) return;
+      setCurrent(index);
       for (const side of ["left", "right"] as const) panes[side].current?.scrollToPosition(change[side], JUMP_MARGIN_PX);
     },
     // biome-ignore lint/correctness/useExhaustiveDependencies: pane refs are stable
-    [changes, current],
+    [changes],
   );
+  const jump = (direction: 1 | -1) => goTo(Math.min(Math.max(current + direction, 0), changes.length - 1));
+
+  // ?change=N opens at that change once both documents are on screen.
+  const linkedChange = useRef(Number(new URLSearchParams(window.location.search).get("change")) || 0);
+  useEffect(() => {
+    if (!linkedChange.current || !changes.length || !pdfs.left || !pdfs.right) return;
+    const index = linkedChange.current - 1;
+    linkedChange.current = 0;
+    setTimeout(() => goTo(index), 300); // let pdf.js lay out the pages first
+  }, [changes, pdfs.left, pdfs.right, goTo]);
+
+  // Keep ?change= on the current change, so the address can be shared as is.
+  useEffect(() => {
+    if (current < 0) return;
+    const url = new URL(window.location.href);
+    url.searchParams.set("change", String(current + 1));
+    window.history.replaceState(null, "", url);
+  }, [current]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -152,10 +174,10 @@ export function App() {
           <span className="counter">
             {found
               ? `${current >= 0 ? current + 1 : "–"} / ${changes.length} changes`
-              : left?.state === "ready" && right?.state === "ready"
-                ? pageCount
-                  ? `Comparing… ${Math.round((100 * pagesRead) / pageCount)}%`
-                  : "Loading PDFs…"
+              : shas.left && shas.right
+                ? progress !== null
+                  ? `Comparing… ${Math.round(100 * progress)}%`
+                  : "Comparing…"
                 : ""}
           </span>
           <button type="button" onClick={() => jump(1)} disabled={!changes.length} title="Next change ( ] or n )">
@@ -285,18 +307,45 @@ function SourcePanel({ change, comparison }: { change: Change; comparison: Compa
 }
 
 /** The changes, once the text of both PDFs has been read. */
-/** The changes, once both PDFs' text has been read; meanwhile how many pages have been read. */
-function useChanges(comparison: Comparison | null, pdfs: Partial<Record<Side, PDFDocumentProxy>>) {
+/**
+ * The changes, once the text of both versions is known; meanwhile how many pages have been read.
+ * The text comes ready-made from the server when it has it, else it is read from the PDF here.
+ */
+function useChanges(
+  comparison: Comparison | null,
+  shas: Partial<Record<Side, string>>,
+  pdfs: Partial<Record<Side, PDFDocumentProxy>>,
+) {
   const [changes, setChanges] = useState<Change[] | null>(null);
+  const [text, setText] = useState<Partial<Record<Side, TextRun[][]>>>({});
   const [pagesRead, setPagesRead] = useState(0);
-  const { left, right } = pdfs;
 
+  // Ready-made text from the server.
   useEffect(() => {
-    setChanges(null);
+    setText({});
     setPagesRead(0);
-    if (!comparison || !left || !right) return;
     let cancelled = false;
-    const text = (pdf: PDFDocumentProxy) =>
+    for (const side of ["left", "right"] as const) {
+      const sha = shas[side];
+      if (!sha) continue;
+      fetch(archiveUrls(ARCHIVE, sha).text)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((pages: TextRun[][] | null) => {
+          if (pages && !cancelled) setText((t) => ({ ...t, [side]: t[side] ?? pages }));
+        })
+        .catch(() => {});
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [shas.left, shas.right]);
+
+  // Otherwise read it from the PDF once that has loaded.
+  useEffect(() => {
+    let cancelled = false;
+    for (const side of ["left", "right"] as const) {
+      const pdf = pdfs[side];
+      if (!pdf || text[side]) continue;
       Promise.all(
         Array.from({ length: pdf.numPages }, (_, i) =>
           extractRuns(pdf, i + 1).then((runs) => {
@@ -304,17 +353,23 @@ function useChanges(comparison: Comparison | null, pdfs: Partial<Record<Side, PD
             return runs;
           }),
         ),
-      );
-    Promise.all([text(left), text(right)]).then(([l, r]) => {
-      if (!cancelled) setChanges(findChanges(comparison, { left: l, right: r }));
-    });
+      ).then((pages) => {
+        if (!cancelled) setText((t) => ({ ...t, [side]: t[side] ?? pages }));
+      });
+    }
     return () => {
       cancelled = true;
     };
-  }, [comparison, left, right]);
+    // biome-ignore lint/correctness/useExhaustiveDependencies: only when a PDF arrives, not when text does
+  }, [pdfs.left, pdfs.right]);
 
-  const pageCount = left && right ? left.numPages + right.numPages : 0;
-  return { changes, pagesRead, pageCount };
+  useEffect(() => {
+    setChanges(null);
+    if (comparison && text.left && text.right) setChanges(findChanges(comparison, { left: text.left, right: text.right }));
+  }, [comparison, text.left, text.right]);
+
+  const toRead = (["left", "right"] as const).reduce((n, side) => n + (text[side] ? 0 : (pdfs[side]?.numPages ?? 0)), 0);
+  return { changes, progress: toRead ? Math.min(1, pagesRead / toRead) : null };
 }
 
 function marksByPage(changes: Change[]): Record<Side, Map<number, Mark[]>> {

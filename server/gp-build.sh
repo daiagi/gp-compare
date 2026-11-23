@@ -9,12 +9,14 @@
 #   gp-build.sh pr/590-base     the commit that pull request branched from
 #   gp-build.sh --resolve REF   print "<sha> <label>" without building
 #   gp-build.sh --image         only build the TeX image (setup does this once)
+#   gp-build.sh --text SHA      extract the text of a version built elsewhere (the public archive)
 #
 # Builds run in the TeX image from build-pdf.Dockerfile (built on first use).
 set -euo pipefail
 
-RESOLVE_ONLY=
+RESOLVE_ONLY= TEXT_ONLY=
 if [ "${1:-}" = "--resolve" ]; then RESOLVE_ONLY=1; shift; fi
+if [ "${1:-}" = "--text" ]; then TEXT_ONLY="${2:?usage: gp-build.sh --text SHA}"; set -- --image; fi
 REF="${1:?usage: gp-build.sh [--resolve] <tag|sha|branch|pr/N|pr/N-base> | --image}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ARCHIVE="${GP_WORKSPACE:-$HERE/../workspace}"
@@ -59,9 +61,10 @@ mkdir -p "$DIST"
 exec 9>"$ARCHIVE/.build.lock"
 flock 9
 
-IMAGE=gp-compare-tex
-IMAGE_FREE_GB=${IMAGE_FREE_GB:-10}   # the TeX packages take ~5 GB, and ~2 GB more while they unpack
-BUILD_FREE_GB=${BUILD_FREE_GB:-2}    # one build is ~15 MB; keep room for logs and the OS
+# The image is tagged by its Dockerfile, so changing the Dockerfile builds a new one.
+IMAGE="gp-compare-tex:$(sha256sum < "$HERE/build-pdf.Dockerfile" | cut -c1-12)"
+IMAGE_FREE_GB=${IMAGE_FREE_GB:-10}   # a fresh image: the TeX packages take ~5 GB, and ~2 GB more while they unpack
+BUILD_FREE_GB=${BUILD_FREE_GB:-2}    # one build is ~25 MB; keep room for logs and the OS
 
 free_gb() { df --output=avail -BG "$DIST" | tail -1 | tr -dc 0-9; }
 
@@ -78,18 +81,29 @@ make_room() {
 }
 
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
-  make_room "$IMAGE_FREE_GB"
+  # Rebuilding on top of an existing image reuses its TeX layers and needs little space.
+  if docker images -q gp-compare-tex | grep -q .; then make_room "$BUILD_FREE_GB"; else make_room "$IMAGE_FREE_GB"; fi
   DOCKER_BUILDKIT=1 timeout 60m docker build -t "$IMAGE" -f "$HERE/build-pdf.Dockerfile" "$HERE" ||
     { docker builder prune -af >/dev/null 2>&1; exit 1; }
+  docker images gp-compare-tex --format '{{.Repository}}:{{.Tag}}' | grep -vx "$IMAGE" | xargs -r docker rmi >/dev/null 2>&1 || true
   docker builder prune -af >/dev/null 2>&1  # the package downloads are not needed after the image exists
+fi
+RUN=(docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$HERE:/app/server:ro,z" -v "$HERE/../src:/app/src:ro,z" -v "$HERE/../package.json:/app/package.json:ro,z"
+  -v "$GP:/workspace/graypaper:z" -v "$DIST:/workspace/dist:z")
+
+if [ -n "$TEXT_ONLY" ]; then
+  [ -f "$DIST/graypaper-$TEXT_ONLY.text.json" ] && exit 0
+  pdf="graypaper-$TEXT_ONLY.pdf"
+  [ -f "$DIST/$pdf" ] || pdf=".upstream-cache/$pdf"
+  [ -f "$DIST/$pdf" ] || curl -fsS --create-dirs -o "$DIST/$pdf" "https://gp.fluffylabs.dev/graypaper-$TEXT_ONLY.pdf"
+  exec timeout 5m "${RUN[@]}" -e VERSION="$TEXT_ONLY" -e TEXT_FROM="/workspace/dist/$pdf" "$IMAGE"
 fi
 [ "$REF" = "--image" ] && exit 0
 
 if [ ! -f "$DIST/graypaper-$SHA.pdf" ]; then
   make_room "$BUILD_FREE_GB"
   git -C "$GP" -c advice.detachedHead=false checkout -q --detach "$SHA"
-  timeout 10m docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e VERSION="$SHA" \
-    -v "$GP:/workspace/graypaper:z" -v "$DIST:/workspace/dist:z" "$IMAGE" ||
+  timeout 10m "${RUN[@]}" -e VERSION="$SHA" "$IMAGE" ||
     { rm -f "$DIST"/graypaper.* "$DIST/graypaper-$SHA".*; rm -rf "$DIST/tex-$SHA"; exit 1; }
 fi
 

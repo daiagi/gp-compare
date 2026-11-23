@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { describe, expect, it, vi } from "vitest";
-import { extractRuns } from "../ui/pdfText";
+import { extractRuns } from "./pdfText";
 import { archiveUrls } from "./archive";
 import { compareDocs, loadDoc, type Side } from "./compare";
 import { type Change, chars, diffChars, findChanges, type TextRun } from "./words";
