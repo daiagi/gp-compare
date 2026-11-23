@@ -195,10 +195,24 @@ class Handler(SimpleHTTPRequestHandler):
                     fetch(f"{UPSTREAM}/{name}", path)
                 except Exception as e:  # noqa: BLE001
                     return self.send_error(404, str(e))
+        # Our builds can be redone (a fix in the build), so browsers check back each time and get a
+        # cheap 304 when nothing changed. Files from the public archive never change.
+        stat = path.stat()
+        etag = f'"{stat.st_mtime_ns:x}-{stat.st_size:x}"'
+        upstream = path.is_relative_to(CACHE)
+        if not upstream and self.headers.get("If-None-Match") == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.end_headers()
+            return
         self.send_response(200)
         self.send_header("Content-Type", self.guess_type(str(path)))
-        self.send_header("Content-Length", str(path.stat().st_size))
-        self.send_header("Cache-Control", "max-age=31536000, immutable")
+        self.send_header("Content-Length", str(stat.st_size))
+        if upstream:
+            self.send_header("Cache-Control", "max-age=31536000, immutable")
+        else:
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("ETag", etag)
         self.end_headers()
         with open(path, "rb") as f:
             shutil.copyfileobj(f, self.wfile)
